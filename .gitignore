@@ -1,7 +1,13 @@
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Local configuration
 .env
 .env.*
 !.env.example
+
+# Downloaded SEC filings
+10K_*.html
