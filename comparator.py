@@ -3,6 +3,14 @@ from pathlib import Path
 
 from extractor import extract_risk_units
 
+from diff_detector import (
+    detect_text_changes,
+    split_sentences,
+    detect_sentence_changes,
+    find_shifted_sentences,
+    sentence_similarity
+)
+
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -82,18 +90,20 @@ def build_similarity_matrix(texts_old, texts_new):
 
 
 # --------------------------------------------------
-# 3. BEST AND SECOND-BEST MATCH
+# 3. BEST AND SECOND-BEST CANDIDATES
 # --------------------------------------------------
 
 def get_best_candidates(scores):
     """
     Find the highest and second-highest similarity
-    scores in one row or column.
+    scores in a row or column.
 
-    The gap is a diagnostic, not a probability.
+    Score gaps are diagnostics, not probabilities.
     """
 
-    ranked_indices = scores.argsort()[::-1]
+    if len(scores) == 0:
+        raise ValueError("Candidate scores cannot be empty")
+    ranked_indices = sorted(range(len(scores)), key=lambda i: (-float(scores[i]), i))
 
     best_index = int(ranked_indices[0])
     best_score = float(scores[best_index])
@@ -122,9 +132,9 @@ def get_best_candidates(scores):
 # 4. COMPARE TWO YEARS
 # --------------------------------------------------
 
-def compare_years(file_old, file_new):
+def compare_years(file_old, file_new, *, verbose=False):
 
-    # Extract risks using the corrected extractor.
+    # Extract disclosures
     risks_old = extract_risk_units(file_old)
     risks_new = extract_risk_units(file_new)
 
@@ -134,11 +144,13 @@ def compare_years(file_old, file_new):
             "no risks for at least one filing."
         )
 
-    print("Old year risks:", len(risks_old))
-    print("New year risks:", len(risks_new))
+    if verbose:
+        print("Old year risks:", len(risks_old))
+    if verbose:
+        print("New year risks:", len(risks_new))
 
     # ----------------------------------------------
-    # Prepare text
+    # Prepare texts
     # ----------------------------------------------
 
     full_texts_old = [
@@ -166,7 +178,7 @@ def compare_years(file_old, file_new):
     ]
 
     # ----------------------------------------------
-    # Three similarity matrices
+    # Build similarity matrices
     # ----------------------------------------------
 
     full_similarities = build_similarity_matrix(
@@ -182,21 +194,6 @@ def compare_years(file_old, file_new):
     body_similarities = build_similarity_matrix(
         bodies_old,
         bodies_new
-    )
-
-    print(
-        "Full-text similarity matrix:",
-        full_similarities.shape
-    )
-
-    print(
-        "Heading similarity matrix:",
-        heading_similarities.shape
-    )
-
-    print(
-        "Body similarity matrix:",
-        body_similarities.shape
     )
 
     # ----------------------------------------------
@@ -310,60 +307,35 @@ def compare_years(file_old, file_new):
         )
 
     # ----------------------------------------------
-    # Classify matches
+    # Classification
     # ----------------------------------------------
 
     for match in matches_old_to_new:
-
-        match["classification"] = (
-            classify_forward_match(match)
+        match["classification"] = classify_forward_match(
+            match
         )
 
     for match in matches_new_to_old:
-
-        match["classification"] = (
-            classify_reverse_match(match)
+        match["classification"] = classify_reverse_match(
+            match
         )
 
     # ----------------------------------------------
     # Aggregate categories
     # ----------------------------------------------
 
-    mostly_unchanged = []
-    modified = []
-    removed = []
-    new = []
-    needs_review = []
-
-    for match in matches_old_to_new:
-
-        classification = match["classification"]
-
-        if classification == "mostly_unchanged":
-            mostly_unchanged.append(match)
-
-        elif classification == "modified":
-            modified.append(match)
-
-        elif classification == "candidate_removed":
-            removed.append(match)
-
-        elif classification == "needs_review":
-            needs_review.append(match)
-
-    for match in matches_new_to_old:
-
-        classification = match["classification"]
-
-        if classification == "candidate_new":
-            new.append(match)
-
-        elif classification == "needs_review":
-
-            # Mutual pairs are already represented
-            # by the forward-direction aggregation.
-            if not match["mutual"]:
-                needs_review.append(match)
+    # Exact ties have no unique best match, even when argmax is reciprocal.
+    for matches in (matches_old_to_new, matches_new_to_old):
+        for match in matches:
+            if match["score_gap"] is not None and match["score_gap"] <= 1e-12:
+                match["classification"] = "needs_review"
+    mostly_unchanged = [m for m in matches_old_to_new if m["classification"] == "mostly_unchanged"]
+    modified = [m for m in matches_old_to_new if m["classification"] == "modified"]
+    removed = [m for m in matches_old_to_new if m["classification"] == "candidate_removed"]
+    new = [m for m in matches_new_to_old if m["classification"] == "candidate_new"]
+    needs_review = [m for m in matches_old_to_new if m["classification"] == "needs_review"]
+    seen = {(m["index_old"], m["index_new"]) for m in needs_review}
+    needs_review += [m for m in matches_new_to_old if m["classification"] == "needs_review" and (m["index_old"],m["index_new"]) not in seen]
 
     return {
         "file_old": str(file_old),
@@ -388,7 +360,7 @@ def compare_years(file_old, file_new):
 
 
 # --------------------------------------------------
-# 5. REPORT RESULTS
+# 5. PRINT COMPARISON RESULTS
 # --------------------------------------------------
 
 def print_results(results):
@@ -428,7 +400,10 @@ def print_results(results):
         print("Old:", match["risk_old"]["heading"])
         print("New:", match["risk_new"]["heading"])
 
-        print("Full score:", round(match["score"], 3))
+        print(
+            "Full score:",
+            round(match["score"], 3)
+        )
 
         print(
             "Heading score:",
@@ -485,7 +460,6 @@ def print_results(results):
             else "N/A"
         )
 
-    # Inspect the final old-year risk explicitly.
     print("\n========== LAST OLD-YEAR RISK ==========")
 
     last_index = len(results["risks_old"]) - 1
@@ -495,7 +469,10 @@ def print_results(results):
     print("Old:", last_match["risk_old"]["heading"])
     print("New:", last_match["risk_new"]["heading"])
 
-    print("Full score:", round(last_match["score"], 3))
+    print(
+        "Full score:",
+        round(last_match["score"], 3)
+    )
 
     print(
         "Heading score:",
@@ -512,7 +489,219 @@ def print_results(results):
 
 
 # --------------------------------------------------
-# 6. MAIN
+# 6. DIFF DIAGNOSTICS
+# --------------------------------------------------
+
+def print_diff_diagnostics(results):
+
+    if not results["modified"]:
+        print("\nNo modified matches to inspect.")
+        return
+
+    match = results["modified"][0]
+
+    old_body = match["risk_old"]["body"]
+    new_body = match["risk_new"]["body"]
+
+    print("\n========== TEXTUAL CHANGES ==========")
+    print("Risk:", match["risk_old"]["heading"])
+
+    print("\nOld body length:", len(old_body))
+    print("New body length:", len(new_body))
+
+    print("\nOld body ending:", old_body[-250:])
+    print("\nNew body ending:", new_body[-250:])
+
+    # ----------------------------------------------
+    # Word-level changes
+    # ----------------------------------------------
+
+    changes = detect_text_changes(
+        old_body,
+        new_body
+    )
+
+    print("\nADDED:")
+    for passage in changes["added"]:
+        print("+", passage[:300])
+
+    print("\nREMOVED:")
+    for passage in changes["removed"]:
+        print("-", passage[:300])
+
+    print("\nREPLACED:")
+    for change in changes["replaced"]:
+        print("Old:", change["old"][:300])
+        print("New:", change["new"][:300])
+        print()
+
+    # ----------------------------------------------
+    # Sentence splitting
+    # ----------------------------------------------
+
+    print(
+        "\n========== SENTENCE SPLITTING EXPERIMENT =========="
+    )
+
+    old_sentences = split_sentences(old_body)
+    new_sentences = split_sentences(new_body)
+
+    print("2024 sentence-like segments:", len(old_sentences))
+    print("2025 sentence-like segments:", len(new_sentences))
+
+    print(
+        "\nFirst 2024 segment:",
+        old_sentences[0] if old_sentences else "N/A"
+    )
+
+    print(
+        "\nFirst 2025 segment:",
+        new_sentences[0] if new_sentences else "N/A"
+    )
+
+    print(
+        "\nNOTE: The regex may split abbreviations "
+        "such as U.S. incorrectly."
+    )
+
+    # ----------------------------------------------
+    # Structured sentence-level changes
+    # ----------------------------------------------
+
+    print("\n========== SENTENCE-LEVEL CHANGES ==========")
+
+    sentence_changes = detect_sentence_changes(
+        old_body,
+        new_body
+    )
+
+    print(
+        "Exact unchanged:",
+        len(sentence_changes["exact_unchanged"])
+    )
+
+    print(
+        "Candidate added:",
+        len(sentence_changes["candidate_added"])
+    )
+
+    print(
+        "Candidate removed:",
+        len(sentence_changes["candidate_removed"])
+    )
+
+    print(
+        "Replacement blocks needing review:",
+        len(sentence_changes["needs_review"])
+    )
+
+    for block in sentence_changes["needs_review"]:
+
+        print()
+        print("Old sentences:", len(block["old_sentences"]))
+        print("New sentences:", len(block["new_sentences"]))
+        print("Reason:", block["reason"])
+
+    # ----------------------------------------------
+    # Index-shift diagnostic
+    # ----------------------------------------------
+
+    print("\n========== INDEX SHIFTS ==========")
+
+    find_shifted_sentences(
+        old_body,
+        new_body
+    )
+
+    # ----------------------------------------------
+    # Unresolved one-to-one sentence-pair similarity experiment
+    # ----------------------------------------------
+
+    print("\n========== SENTENCE PAIR SCORES ==========")
+
+    for block in sentence_changes["needs_review"]:
+
+        old_block = block["old_sentences"]
+        new_block = block["new_sentences"]
+
+        if len(old_block) == 1 and len(new_block) == 1:
+
+            score = sentence_similarity(
+                old_block[0],
+                new_block[0]
+            )
+
+            print("\nOld:", old_block[0][:180])
+            print("New:", new_block[0][:180])
+            print("Sequence similarity:", round(score, 3))
+
+def analyze_all_modified_sentences(results):
+
+    print("\n========== ALL MODIFIED RISK SENTENCE SCORES ==========")
+
+    total_pairs = 0
+    all_scores = []
+
+    for risk_number, match in enumerate(results["modified"], start=1):
+
+        old_body = match["risk_old"]["body"]
+        new_body = match["risk_new"]["body"]
+
+        sentence_changes = detect_sentence_changes(
+            old_body,
+            new_body
+        )
+
+        print("\n" + "=" * 60)
+        print("RISK:", risk_number)
+        print("HEADING:", match["risk_old"]["heading"])
+
+        print(
+            "Replacement blocks:",
+            len(sentence_changes["needs_review"])
+        )
+
+        for block in sentence_changes["needs_review"]:
+
+            old_sentences = block["old_sentences"]
+            new_sentences = block["new_sentences"]
+
+            # One-to-one blocks may still be semantically ambiguous.
+            if len(old_sentences) != 1 or len(new_sentences) != 1:
+                continue
+
+            old_sentence = old_sentences[0]
+            new_sentence = new_sentences[0]
+
+            score = sentence_similarity(
+                old_sentence,
+                new_sentence
+            )
+
+            total_pairs += 1
+            all_scores.append(score)
+
+            print("\n--- SENTENCE PAIR ---")
+
+            print("Old:", old_sentence)
+            print("New:", new_sentence)
+            print("Similarity:", round(score, 3))
+
+    print("\n========== OVERALL SENTENCE SCORE SUMMARY ==========")
+
+    print("One-to-one replacement pairs:", total_pairs)
+
+    if all_scores:
+        print("Minimum similarity:", round(min(all_scores), 3))
+        print("Maximum similarity:", round(max(all_scores), 3))
+        print(
+            "Average similarity:",
+            round(sum(all_scores) / len(all_scores), 3)
+        )
+    else:
+        print("No one-to-one replacement pairs were found.")
+# --------------------------------------------------
+# 7. MAIN
 # --------------------------------------------------
 
 if __name__ == "__main__":
@@ -522,6 +711,13 @@ if __name__ == "__main__":
     file_old = project_dir / "10K_2024-11-01.html"
     file_new = project_dir / "10K_2025-10-31.html"
 
-    results = compare_years(file_old, file_new)
+    results = compare_years(
+        file_old,
+        file_new
+    )
 
     print_results(results)
+
+    print_diff_diagnostics(results)
+
+    analyze_all_modified_sentences(results)

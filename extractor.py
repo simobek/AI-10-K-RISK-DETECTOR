@@ -3,7 +3,12 @@ import re
 from pathlib import Path
 
 from bs4 import BeautifulSoup
-from bs4.element import NavigableString
+
+
+def clean_disclosure_text(text):
+    """Remove narrowly identified SEC page furniture and normalize whitespace."""
+    text = re.sub(r"(?:Apple Inc\.\s*)?\|\s*20\d{2}\s+Form\s+10-K\s*\|\s*\d+\b", " ", text, flags=re.I)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # --------------------------------------------------
@@ -73,6 +78,10 @@ def load_item_1a(filename):
 
             if match_1b.start() > match_1a.start():
 
+                # Reject a TOC occurrence spanning a later real Item 1A.
+                if any(match_1a.start() < other.start() < match_1b.start()
+                       for other in matches_1a):
+                    break
                 start = match_1a.start()
                 end = match_1b.start()
 
@@ -117,7 +126,7 @@ def extract_item_1A(filename):
         risk_factors
     )
 
-    return risk_factors.strip()
+    return clean_disclosure_text(risk_factors)
 
 
 # --------------------------------------------------
@@ -162,69 +171,51 @@ def extract_risk_units(filename):
     )
 
     risks = []
-
     current_heading = None
     current_body = []
+    source_nodes = []
 
-    for span in soup.find_all("span"):
+    def save_risk():
+        if current_heading is None:
+            return
+        raw_body = " ".join(current_body)
+        body = clean_disclosure_text(raw_body)
+        if not body:
+            raise ValueError(f"Empty body for risk: {current_heading}")
+        heading = clean_disclosure_text(current_heading)
+        risks.append({"heading": heading, "body": body,
+                      "full_text": heading + " " + body,
+                      "raw_body": raw_body, "source_file": str(filename),
+                      "source_text_range": [min(source_nodes), max(source_nodes)]})
 
-        positions = [
-            node_positions[id(node)]
-            for node in span.descendants
-            if isinstance(node, NavigableString)
-            and id(node) in node_positions
-            and str(node).strip()
-        ]
-
-        if not positions:
+    # Visit text nodes once: nested spans must not duplicate disclosure text.
+    active_heading_tag = None
+    for node in soup.strings:
+        left, right = node_positions[id(node)]
+        if left < start or right > end or not str(node).strip():
             continue
-
-        span_start = min(position[0] for position in positions)
-        span_end = max(position[1] for position in positions)
-
-        # Prevent Item 1B and subsequent filing
-        # sections from entering risk disclosures.
-        if span_start < start or span_end > end:
-            continue
-
-        span_text = span.get_text(" ", strip=True)
-
-        if not span_text:
-            continue
-
-        if is_risk_heading(span):
-
-            if current_heading is not None:
-
-                body = " ".join(current_body).strip()
-
-                risks.append({
-                    "heading": current_heading,
-                    "body": body,
-                    "full_text": (
-                        current_heading + " " + body
-                    ).strip()
-                })
-
-            current_heading = span_text
-            current_body = []
-
+        heading_tag = next((parent for parent in node.parents
+                            if parent.name == "span" and is_risk_heading(parent)), None)
+        if heading_tag is not None:
+            if heading_tag is not active_heading_tag:
+                save_risk()
+                current_heading = heading_tag.get_text(" ", strip=True)
+                current_body = []
+                source_nodes = [left, right]
+                active_heading_tag = heading_tag
         elif current_heading is not None:
-
-            current_body.append(span_text)
-
-    # Save final risk.
-    if current_heading is not None:
-
-        body = " ".join(current_body).strip()
-
-        risks.append({
-            "heading": current_heading,
-            "body": body,
-            "full_text": (
-                current_heading + " " + body
-            ).strip()
-        })
+            # Apple category headings are navigation between risks, not body text.
+            category_names = {"Financial Risks", "Business Risks",
+                              "Legal and Regulatory Compliance Risks",
+                              "Macroeconomic and Industry Risks"}
+            if str(node).strip() in category_names and any(
+                parent.name == "span" and "font-weight:700" in re.sub(r"\s+", "", parent.get("style", ""))
+                for parent in node.parents
+            ):
+                continue
+            current_body.append(str(node))
+            source_nodes.extend([left, right])
+    save_risk()
 
     if not risks:
         raise ValueError(

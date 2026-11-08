@@ -1,81 +1,54 @@
+"""Download recent SEC 10-K filings with explicit identity and local caching."""
 import os
+import re
 import time
 from pathlib import Path
 import requests
 
 
-def download_10k_filings(cik):
-    padded_cik = str(cik).zfill(10)
+def download_10k_filings(cik, output_dir=None):
+    """Return cached/downloaded paths; raise on invalid SEC data or HTTP errors.
 
-    user_agent = os.environ.get("SEC_USER_AGENT")
-    if not user_agent:
-        raise ValueError("Set SEC_USER_AGENT to your name and contact email.")
-
-    headers = {"User-Agent": user_agent}
-    project_dir = Path(__file__).resolve().parent
-
-    submissions_url = (
-        f"https://data.sec.gov/submissions/CIK{padded_cik}.json"
-    )
-
-    response = requests.get(submissions_url, headers=headers, timeout=30)
-
-    print("Submissions status:", response.status_code)
-
-    if response.status_code != 200:
-        print("Could not fetch submissions data.")
-        return
-
-    data = response.json()
-
-    print("Company:", data["name"])
-
-    recent = data["filings"]["recent"]
-
-    for i in range(len(recent["form"])):
-        if recent["form"][i] == "10-K":
-
-            filing_date = recent["filingDate"][i]
-            accession_number = recent["accessionNumber"][i]
-            primary_document = recent["primaryDocument"][i]
-
-            clean_accession_number = accession_number.replace("-", "")
-
-            filing_url = (
-                f"https://www.sec.gov/Archives/edgar/data/"
-                f"{cik}/{clean_accession_number}/{primary_document}"
-            )
-
-            filename = project_dir / f"10K_{filing_date}.html"
-
-            if os.path.exists(filename):
-                print("Already downloaded:", filename)
-                continue
-
-            print()
-            print("10-K found")
-            print("Date:", filing_date)
-            print("Accession number:", accession_number)
-            print("Primary document:", primary_document)
-            print("URL:", filing_url)
-
-            time.sleep(0.2)
-            filing_response = requests.get(
-                filing_url,
-                headers=headers,
-                timeout=30
-            )
-
-            print("HTML status:", filing_response.status_code)
-
-            if filing_response.status_code == 200:
-                with open(filename, "w", encoding="utf-8") as file:
-                    file.write(filing_response.text)
-
-                print("Saved:", filename)
-            else:
-                print("Could not download:", filename)
+    The submissions index is refreshed each call. Filings are cached under a
+    company-specific directory to prevent collisions between equal filing dates.
+    """
+    cik = str(cik)
+    if not re.fullmatch(r'\d{1,10}', cik) or int(cik) == 0:
+        raise ValueError('CIK must be a positive identifier of at most 10 digits')
+    cik = str(int(cik))
+    identity = os.environ.get('SEC_USER_AGENT')
+    if not identity:
+        raise ValueError('Set SEC_USER_AGENT to your name and contact email.')
+    headers = {'User-Agent':identity}
+    directory = Path(output_dir) if output_dir is not None else Path(__file__).resolve().parent / 'filings' / cik.zfill(10)
+    response = requests.get(f'https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json',headers=headers,timeout=30)
+    response.raise_for_status()
+    recent = response.json()['filings']['recent']
+    fields = ('form','filingDate','accessionNumber','primaryDocument')
+    if any(not isinstance(recent.get(key),list) for key in fields) or len({len(recent[key]) for key in fields}) != 1:
+        raise ValueError('Malformed SEC recent filings arrays')
+    directory.mkdir(parents=True,exist_ok=True)
+    paths=[]
+    for form,date,accession,document in zip(*(recent[key] for key in fields)):
+        if form != '10-K':
+            continue
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}',date) or not re.fullmatch(r'\d{10}-\d{2}-\d{6}',accession) or not re.fullmatch(r'[\w.-]+',document):
+            raise ValueError('Invalid SEC filing identifier')
+        path=directory / f'10K_{date}.html'
+        paths.append(path)
+        if path.exists() and path.stat().st_size:
+            continue
+        time.sleep(0.2)
+        filing=requests.get(f'https://www.sec.gov/Archives/edgar/data/{cik}/{accession.replace("-", "")}/{document}',headers=headers,timeout=30)
+        filing.raise_for_status()
+        if not filing.text.strip() or '<html' not in filing.text.lower():
+            raise ValueError('SEC response is not an HTML filing')
+        temporary=path.with_suffix('.html.tmp')
+        temporary.write_text(filing.text,encoding='utf-8')
+        temporary.replace(path)
+    return paths
 
 
-if __name__ == "__main__":
-    download_10k_filings(320193)
+if __name__ == '__main__':
+    for path in download_10k_filings(320193):
+        print(path)

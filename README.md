@@ -53,7 +53,7 @@ python sec_fetcher.py
 SEC_USER_AGENT="Your Name your.email@example.com" python sec_fetcher.py
 ```
 
-The fetcher saves `10K_YYYY-MM-DD.html` files in the project directory and skips files already present. Downloaded filings are excluded from version control. It reads the SEC submissions endpoint's recent filing list; this is not a complete historical archive.
+The fetcher saves `10K_YYYY-MM-DD.html` files under `filings/<padded CIK>/` and skips nonempty files already present. Downloaded filings are excluded from version control. It reads the SEC submissions endpoint's recent filing list; this is not a complete historical archive.
 
 ### 2. Inspect extraction
 
@@ -61,7 +61,7 @@ The fetcher saves `10K_YYYY-MM-DD.html` files in the project directory and skips
 python extractor.py
 ```
 
-Prints extraction diagnostics for the 2024 and 2025 filings, including first and last risk headings and basic section-boundary checks.
+Prints extraction diagnostics for the 2024 and 2025 filings, including first and last risk headings and basic section-boundary checks. This legacy command expects the filings in the project root; copy the downloaded pair there first.
 
 ### 3. Compare reporting years
 
@@ -69,7 +69,7 @@ Prints extraction diagnostics for the 2024 and 2025 filings, including first and
 python comparator.py
 ```
 
-By default, compares `10K_2024-11-01.html` with `10K_2025-10-31.html` and prints a report to the terminal. To compare other filings, update `file_old` and `file_new` in the script's main block.
+This legacy command also expects root-level filings. By default, compares `10K_2024-11-01.html` with `10K_2025-10-31.html` and prints a report to the terminal. To compare other filings, update `file_old` and `file_new` in the script's main block.
 
 ## How matching works
 
@@ -100,3 +100,13 @@ The extractor currently relies on Apple-specific HTML styling and heuristic sect
 ## Data source
 
 Filings are downloaded from [SEC EDGAR](https://www.sec.gov/edgar). Follow the SEC's [automated access guidance](https://www.sec.gov/os/accessing-edgar-data) when downloading data.
+
+## Offline deterministic baseline
+
+Run `python report.py --old filings/0000320193/10K_2024-11-01.html --new filings/0000320193/10K_2025-10-31.html` from the project directory to write `reports/apple_2024_2025.json` without network requests. Use `--old`, `--new` and `--output` for other paths. The legacy `python comparator.py` still prints diagnostics; its old experiment headings are historical, while the JSON report is the current structured interface.
+
+Install `requirements-dev.txt` for pytest. Run `python -m pytest -m "not integration"` and `python -m pytest -m integration`. Tests prohibit HTTP calls unless explicitly mocked. Cached-filing integration tests skip explicitly when files are missing.
+
+See `reports/VALIDATION.md` for review findings and limits. Review `evaluation/annotations.json`, assign `human_label` from the risk classification vocabulary and set `reviewed` to true only after human review. `python evaluate.py` evaluates only those verified records. There are currently no verified labels, so no accuracy claim is supported.
+
+Fetcher downloads now default to `filings/<padded CIK>/` and return local paths. Existing root-level filings are preserved and used by the default comparison. Extraction is Apple-format-specific. The system detects disclosed language changes, not objective business risk changes.

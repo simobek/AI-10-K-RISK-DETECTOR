@@ -11,3 +11,12 @@ venv/
 
 # Downloaded SEC filings
 10K_*.html
+
+# Local caches and generated artifacts
+.pytest_cache/
+filings/
+*.html.tmp
+reports/*
+!reports/VALIDATION.md
+HANDOFF_PROMPT.md
+baseline.txt
